@@ -1,0 +1,304 @@
+Designed and deployed a production-grade self-hosted operations platform
+(OPS-HUB 2026) on Ubuntu Server using Docker, Grafana, Prometheus, Loki,
+WireGuard VPN, and a 5-layer security stack with automated monitoring,
+logging, backups, and CI/CD-style Git version control.
+
+
+
+
+
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROJECT: OPS-HUB 2026 — Zero-Trust Self-Hosted Operations Platform
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Role         : System Administrator / DevOps Engineer
+Type         : Personal Infrastructure Project
+Platform     : Ubuntu Server 20.04 LTS
+Year         : 2026
+
+OVERVIEW
+────────
+Designed, deployed, and maintained a complete self-hosted operations
+platform on a single Ubuntu server using Docker and open-source tools.
+The platform provides real-time monitoring, centralized logging,
+multi-layer security, automated backups, VPN access, and Git-based
+configuration management.
+
+INFRASTRUCTURE
+──────────────
+• Deployed and managed 10 Docker containers using Docker Compose
+• Configured persistent volumes and custom bridge networking
+• Built automated deployment scripts using Bash
+
+MONITORING & OBSERVABILITY
+──────────────────────────
+• Prometheus    — Metrics collection every 15 seconds (6 targets)
+• Grafana       — 4 custom dashboards (System, Docker, Logs, Overview)
+• Loki          — Centralized log aggregation (5 log sources)
+• Promtail      — Log shipping from system and Docker containers
+• Node Exporter — Hardware-level metrics (CPU, memory, disk, network)
+• cAdvisor      — Per-container resource monitoring
+• Uptime Kuma   — Service uptime monitoring with alerting
+
+SECURITY
+────────
+• UFW Firewall     — 15+ rules, default deny policy
+• Fail2Ban         — Automatic IP banning after 3 failed SSH attempts
+• WireGuard VPN    — Encrypted remote access tunnel (UDP 51820)
+• SSH Hardening    — Key-only auth, root disabled, max 3 attempts,
+                     custom banner, VERBOSE logging
+• Authelia         — Single Sign-On (SSO) with MFA/TOTP support
+• Auto Updates     — Unattended security patches via apt
+
+BACKUP & RECOVERY
+─────────────────
+• Restic           — Encrypted automated daily backups (2 AM cron)
+• Retention policy — 7 daily, 4 weekly, 3 monthly snapshots
+• Scope            — Configs, Docker volumes, SSH, UFW, Fail2Ban rules
+• Restore script   — Documented and tested recovery procedure
+
+PLATFORM
+────────
+• Caddy            — Reverse proxy with custom HTML landing page
+• Gitea            — Self-hosted private Git repository
+• Version Control  — All configurations tracked in Git
+
+AUTOMATION
+──────────
+• setup-security.sh  — One-shot security hardening automation
+• setup-advanced.sh  — Full stack deployment automation
+• sysinfo.sh         — Real-time system status report
+• healthcheck.sh     — Full stack health verification
+• backup.sh          — Automated backup with logging
+• restore.sh         — Guided restore tool
+• showcase.sh        — Project demonstration script
+
+KEY METRICS
+───────────
+• 10 Docker containers managed
+• 5 security layers implemented
+• 4 Grafana dashboards created
+• 5 log sources aggregated
+• 6 Prometheus scrape targets
+• 15+ firewall rules configured
+• 93%+ health check pass rate
+• Daily automated backups
+
+TECHNOLOGIES USED
+─────────────────
+Docker · Docker Compose · Ubuntu Server · Bash Scripting
+Grafana · Prometheus · Loki · Promtail · PromQL
+Node Exporter · cAdvisor · Uptime Kuma
+UFW · Fail2Ban · WireGuard · OpenSSH · Authelia
+Caddy · Gitea · Restic · Cron · Systemd
+YAML· Git · Linux Networking · IPTables
+
+
+
+
+## GitHub README.md (paste this into your Gitea/GitHub repo)
+
+markdown
+# OPS-HUB 2026
+### Zero-Trust Self-Hosted Operations Platform
+
+![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04-orange)
+![Docker](https://img.shields.io/badge/Docker-Compose-blue)
+![Grafana](https://img.shields.io/badge/Grafana-Monitoring-red)
+![Status](https://img.shields.io/badge/Status-Production-green)
+![Security](https://img.shields.io/badge/Security-5%20Layers-critical)
+
+
+
+## Overview
+
+A complete self-hosted operations platform built on Ubuntu Server
+using Docker and open-source tools. Provides real-time monitoring,
+centralized logging, multi-layer security, automated backups,
+VPN access, and Git version control.
+
+
+
+## Architecture
+
+
+Internet → UFW Firewall → Fail2Ban → SSH Hardened → Server
+                                         │
+              ┌──────────────────────────┼──────────────────────┐
+              │                          │                      │
+         WireGuard VPN            Caddy :80              Authelia :9091
+              │                          │                      │
+    ┌─────────┴──────────────────────────┴──────────────────────┘
+    │
+    ├── Grafana      :3000  (Dashboards)
+    ├── Prometheus   :9090  (Metrics)
+    ├── Loki         :3100  (Logs)
+    ├── Uptime Kuma  :3001  (Uptime)
+    ├── cAdvisor     :8080  (Containers)
+    ├── Node Export  :9100  (System)
+    ├── Promtail           (Log Shipping)
+    └── Gitea        :3002  (Git Repo)
+
+
+
+
+## Stack
+
+| Category      | Tools                                    |
+|---------------|------------------------------------------|
+| OS            | Ubuntu Server 20.04 LTS                  |
+| Containers    | Docker + Docker Compose                  |
+| Monitoring    | Prometheus, Grafana, Node Exporter       |
+| Logging       | Loki, Promtail                           |
+| Uptime        | Uptime Kuma                              |
+| Security      | UFW, Fail2Ban, WireGuard, SSH, Authelia  |
+| Web Server    | Caddy                                    |
+| Git           | Gitea                                    |
+| Backups       | Restic                                   |
+| Automation    | Bash, Cron, Systemd                      |
+
+
+
+## Services
+
+| Service       | Port  | Purpose                    |
+|---------------|-------|----------------------------|
+| Grafana       | 3000  | Visual dashboards          |
+| Prometheus    | 9090  | Metrics collection         |
+| Loki          | 3100  | Log aggregation            |
+| Node Exporter | 9100  | System metrics             |
+| cAdvisor      | 8080  | Container metrics          |
+| Uptime Kuma   | 3001  | Uptime monitoring          |
+| Caddy         | 80    | Reverse proxy + Landing    |
+| Authelia      | 9091  | SSO + MFA                  |
+| Gitea         | 3002  | Git repository             |
+| Promtail      | -     | Log shipping agent         |
+
+
+
+## Security Layers
+
+| Layer         | Tool          | Protection                       |
+|---------------|---------------|----------------------------------|
+| 1             | UFW           | Port-level access control        |
+| 2             | Fail2Ban      | Brute force prevention           |
+| 3             | WireGuard     | Encrypted VPN tunnel             |
+| 4             | SSH Hardening | Key-only auth, root disabled     |
+| 5             | Auto Updates  | Automated security patches       |
+
+---
+
+## Quick Start
+
+bash
+# Clone configs
+git clone http://your-gitea/opsadmin/ops-hub-configs.git
+cd ops-hub-configs
+
+# Deploy stack
+docker-compose up -d
+
+# Check health
+./healthcheck.sh
+
+# System report
+./sysinfo.sh
+
+## Admin Scripts
+
+bash
+./sysinfo.sh       # Full system report
+./healthcheck.sh   # Stack health check
+./backup.sh        # Manual backup
+./restore.sh       # Restore guide
+./showcase.sh      # Project demo
+
+
+## Project Stats
+
+- 10 Docker containers
+- 5 security layers
+- 4 Grafana dashboards
+- 5 log sources (auth, syslog, kern, docker, varlogs)
+- 6 Prometheus targets
+- Daily automated backups
+- 93%+ health score
+
+
+
+## Skills Demonstrated
+
+- Linux server administration
+- Docker container orchestration
+- Monitoring and observability (Prometheus/Grafana)
+- Log aggregation and analysis (Loki)
+- Network security and firewall management
+- VPN configuration and management
+- SSH hardening and security
+- Backup strategy and disaster recovery
+- Bash scripting and automation
+- Git version control
+- Infrastructure as Code
+
+## LinkedIn Post (copy paste ready)
+
+
+🚀 Just completed OPS-HUB 2026 — a full self-hosted operations
+platform built from scratch on Ubuntu Server!
+
+Here's what I built:
+
+📊 MONITORING STACK
+→ Grafana dashboards for real-time visualization
+→ Prometheus for metrics collection
+→ Loki for centralized log aggregation
+→ Uptime Kuma for service monitoring
+→ cAdvisor for container metrics
+
+🔒 SECURITY (5 layers)
+→ UFW Firewall with custom rules
+→ Fail2Ban for intrusion prevention
+→ WireGuard VPN for secure access
+→ Hardened SSH configuration
+→ Automated security updates
+
+⚙️ PLATFORM
+→ 10 Docker containers managed with Docker Compose
+→ Caddy reverse proxy with landing page
+→ Gitea self-hosted Git repository
+→ Restic automated daily backups
+→ Full automation with Bash scripts
+
+💡 Key numbers:
+• 10 containers running
+• 5 security layers
+• 4 custom Grafana dashboards
+• 93%+ health check pass rate
+• Daily encrypted backups
+
+Built entirely with open-source tools on a 2GB RAM server.
+This project taught me real sysadmin skills that I can
+apply in any DevOps or cloud engineering role.
+
+#Linux #DevOps #SysAdmin #Docker #Grafana #Prometheus
+#WireGuard #OpenSource #Monitoring #Security #Ubuntu
+#Infrastructure #CloudEngineering #2026
+
+
+## Skills to Add to Resume Skills Section
+
+
+Operating Systems  : Ubuntu Server, Linux Administration
+Containerization   : Docker, Docker Compose
+Monitoring         : Prometheus, Grafana, PromQL, Node Exporter
+Logging            : Loki, Promtail, Log Analysis
+Security           : UFW, Fail2Ban, WireGuard VPN, SSH Hardening
+Web Servers        : Caddy, Reverse Proxy Configuration
+Version Control    : Git, Gitea
+Backup & Recovery  : Restic, Backup Strategy, Disaster Recovery
+Scripting          : Bash, Shell Scripting, Automation
+Networking         : VPN, Firewall, TCP/IP, DNS
+Tools              : cAdvisor, Uptime Kuma, Authelia
+Methodologies      : Infrastructure as Code, GitOps, Observability
