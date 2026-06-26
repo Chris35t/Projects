@@ -1,0 +1,1709 @@
+#!/usr/bin/env python3
+"""
+██╗   ██╗███████╗████████╗████████╗ █████╗ ██╗
+██║   ██║██╔════╝╚══██╔══╝╚══██╔══╝██╔══██╗██║
+██║   ██║█████╗     ██║      ██║   ███████║██║
+╚██╗ ██╔╝██╔══╝     ██║      ██║   ██╔══██║██║
+ ╚████╔╝ ███████╗   ██║      ██║   ██║  ██║██║
+  ╚═══╝  ╚══════╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝╚═╝
+
+வேட்டை (Vettai) — The Hunt
+Professional Binary Recon Tool for CTF RE
+Supports: ELF (Linux) + PE (Windows EXE/DLL)
+Version : 2.1 (bugfix)
+"""
+
+import struct
+import sys
+import os
+import re
+import math
+import hashlib
+import argparse
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional, Dict, Any
+from datetime import datetime, timezone
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ANSI COLOR ENGINE
+# ══════════════════════════════════════════════════════════════════
+
+class C:
+    RST     = "\033[0m"
+    BOLD    = "\033[1m"
+    DIM     = "\033[2m"
+    ITALIC  = "\033[3m"
+    RED     = "\033[91m"
+    GREEN   = "\033[92m"
+    YELLOW  = "\033[93m"
+    BLUE    = "\033[94m"
+    MAGENTA = "\033[95m"
+    CYAN    = "\033[96m"
+    WHITE   = "\033[97m"
+    ORANGE  = "\033[38;5;208m"
+    GRAY    = "\033[90m"
+
+    @classmethod
+    def disable(cls):
+        for attr in list(vars(cls)):
+            if not attr.startswith('_') and isinstance(getattr(cls, attr), str):
+                setattr(cls, attr, '')
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SHARED DATA STRUCTURES
+# ══════════════════════════════════════════════════════════════════
+
+@dataclass
+class SectionInfo:
+    name:       str
+    vaddr:      int
+    offset:     int
+    size:       int
+    label:      str
+    writable:   bool  = False
+    executable: bool  = False
+    entropy:    float = 0.0
+
+@dataclass
+class SuspiciousString:
+    file_offset: int
+    vaddr:       int
+    content:     str
+    category:    str
+
+@dataclass
+class ImportEntry:
+    name:    str
+    dll:     str = ""
+    ordinal: int = 0
+    addr:    int = 0
+
+@dataclass
+class ExportEntry:
+    name:    str
+    addr:    int
+    ordinal: int = 0
+
+@dataclass
+class FlagCandidate:
+    addr:   int
+    reason: str
+    refs:   List[str] = field(default_factory=list)
+
+@dataclass
+class SecurityFlags:
+    nx:            bool = False
+    canary:        bool = False
+    stripped:      bool = True
+    static_linked: bool = True
+    # ELF
+    pie:           bool = False
+    relro:         str  = "None"
+    # PE
+    aslr:          bool = False
+    seh:           bool = False
+    cfg:           bool = False
+    high_entropy:  bool = False
+
+@dataclass
+class BinaryInfo:
+    filepath:   str
+    fmt:        str
+    bits:       int
+    arch:       str
+    entry:      int
+    filesize:   int
+    md5:        str
+    sha256:     str
+    elf_type:   str = ""
+    pe_type:    str = ""
+    compile_ts: str = ""
+    linker_ver: str = ""
+    subsystem:  str = ""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ELF CONSTANTS
+# ══════════════════════════════════════════════════════════════════
+
+class ELF:
+    MAGIC = b'\x7fELF'
+
+    CLASS32, CLASS64 = 1, 2
+    LSB, MSB         = 1, 2
+    ET_EXEC, ET_DYN  = 2, 3
+
+    EM_386     = 3
+    EM_MIPS    = 8
+    EM_PPC     = 20
+    EM_PPC64   = 21
+    EM_ARM     = 40
+    EM_X86_64  = 62
+    EM_AARCH64 = 183
+    EM_RISCV   = 243
+
+    # ── FIX: one consistent name ──
+    MACHINE_NAMES = {
+        3:   "x86 (i386)",
+        8:   "MIPS",
+        20:  "PowerPC",
+        21:  "PowerPC64",
+        40:  "ARM",
+        62:  "x86-64",
+        183: "AArch64",
+        243: "RISC-V",
+    }
+
+    SHT_NULL     = 0
+    SHT_PROGBITS = 1
+    SHT_SYMTAB   = 2
+    SHT_STRTAB   = 3
+    SHT_RELA     = 4
+    SHT_DYNAMIC  = 6
+    SHT_NOTE     = 7
+    SHT_NOBITS   = 8
+    SHT_REL      = 9
+    SHT_DYNSYM   = 11
+
+    SHF_WRITE = 0x1
+    SHF_ALLOC = 0x2
+    SHF_EXEC  = 0x4
+
+    PT_LOAD      = 1
+    PT_DYNAMIC   = 2
+    PT_INTERP    = 3
+    PT_NOTE      = 4
+    PT_GNU_STACK = 0x6474e551
+    PT_GNU_RELRO = 0x6474e552
+
+    PF_X = 0x1
+    PF_W = 0x2
+    PF_R = 0x4
+
+    DT_NEEDED = 1
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PE CONSTANTS
+# ══════════════════════════════════════════════════════════════════
+
+class PE:
+    MAGIC_DOS = b'MZ'
+    MAGIC_PE  = b'PE\x00\x00'
+
+    # ── FIX: one consistent name ──
+    MACHINE_NAMES = {
+        0x014c: "x86 (i386)",
+        0x8664: "x86-64",
+        0x01c0: "ARM",
+        0xaa64: "AArch64",
+        0x0200: "IA-64",
+        0x5032: "RISC-V 32",
+        0x5064: "RISC-V 64",
+        0x0162: "MIPS R3000",
+        0x0166: "MIPS R4000",
+    }
+
+    SUBSYSTEM = {
+        1:  "Native",
+        2:  "Windows GUI",
+        3:  "Windows CUI (console)",
+        5:  "OS/2 CUI",
+        7:  "POSIX CUI",
+        9:  "Windows CE GUI",
+        10: "EFI Application",
+        11: "EFI Boot Driver",
+        12: "EFI Runtime Driver",
+        14: "Xbox",
+        16: "Windows Boot Application",
+    }
+
+    DLLCHAR_HIGH_ENTROPY_VA = 0x0020
+    DLLCHAR_DYNAMIC_BASE    = 0x0040
+    DLLCHAR_NX_COMPAT       = 0x0100
+    DLLCHAR_NO_SEH          = 0x0400
+    DLLCHAR_GUARD_CF        = 0x4000
+
+    PE32     = 0x010b
+    PE32PLUS = 0x020b
+
+    SCN_CNT_CODE        = 0x00000020
+    SCN_CNT_INIT_DATA   = 0x00000040
+    SCN_CNT_UNINIT_DATA = 0x00000080
+    SCN_MEM_EXECUTE     = 0x20000000
+    SCN_MEM_READ        = 0x40000000
+    SCN_MEM_WRITE       = 0x80000000
+
+    DANGEROUS = {
+        'VirtualAlloc', 'VirtualAllocEx', 'VirtualProtect',
+        'WriteProcessMemory', 'CreateRemoteThread',
+        'ShellExecuteA', 'ShellExecuteW',
+        'WinExec', 'CreateProcessA', 'CreateProcessW',
+        'LoadLibraryA', 'LoadLibraryW', 'GetProcAddress',
+        'RegSetValueExA', 'RegSetValueExW',
+        'InternetOpenA', 'InternetOpenW',
+        'URLDownloadToFileA', 'URLDownloadToFileW',
+    }
+
+    CRYPTO = {
+        'CryptEncrypt', 'CryptDecrypt', 'CryptHashData',
+        'BCryptEncrypt', 'BCryptDecrypt', 'BCryptHashData',
+        'CryptAcquireContextA', 'CryptAcquireContextW',
+    }
+
+    CHECK_FUNCS = {
+        'strcmp', 'strncmp', 'memcmp', '_strcmp', '_strncmp',
+        'lstrcmpA', 'lstrcmpW', 'lstrcmpiA', 'lstrcmpiW',
+        'CompareStringA', 'CompareStringW',
+    }
+
+    INPUT_FUNCS = {
+        'scanf', 'gets', 'fgets', 'ReadFile',
+        'ReadConsoleA', 'ReadConsoleW', 'recv', 'WSARecv',
+        'GetDlgItemTextA', 'GetDlgItemTextW',
+    }
+
+    OUTPUT_FUNCS = {
+        'printf', 'puts', 'fprintf', 'write',
+        'WriteFile', 'WriteConsoleA', 'WriteConsoleW',
+        'MessageBoxA', 'MessageBoxW',
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SHARED UTILITIES
+# ══════════════════════════════════════════════════════════════════
+
+def shannon_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    freq = [0] * 256
+    for b in data:
+        freq[b] += 1
+    length = len(data)
+    return -sum(
+        (f / length) * math.log2(f / length)
+        for f in freq if f > 0
+    )
+
+
+def extract_strings(data: bytes, min_len: int = 5) -> List[Tuple[int, str]]:
+    results, current, start = [], [], 0
+    for i, byte in enumerate(data):
+        if 0x20 <= byte <= 0x7e:
+            if not current:
+                start = i
+            current.append(chr(byte))
+        else:
+            if len(current) >= min_len:
+                results.append((start, ''.join(current)))
+            current = []
+    if len(current) >= min_len:
+        results.append((start, ''.join(current)))
+    return results
+
+
+def extract_wide_strings(data: bytes, min_len: int = 4) -> List[Tuple[int, str]]:
+    results, current, start = [], [], 0
+    i = 0
+    while i < len(data) - 1:
+        lo, hi = data[i], data[i + 1]
+        if hi == 0 and 0x20 <= lo <= 0x7e:
+            if not current:
+                start = i
+            current.append(chr(lo))
+            i += 2
+        else:
+            if len(current) >= min_len:
+                results.append((start, ''.join(current)))
+            current = []
+            i += 1
+    if len(current) >= min_len:
+        results.append((start, ''.join(current)))
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════
+#  STRING ANALYZER
+# ══════════════════════════════════════════════════════════════════
+
+class StringAnalyzer:
+
+    FLAG_RE = [
+        re.compile(r'flag\{',          re.I),
+        re.compile(r'ctf\{',           re.I),
+        re.compile(r'\bcorrect\b',     re.I),
+        re.compile(r'\bwrong\b',       re.I),
+        re.compile(r'\bsuccess\b',     re.I),
+        re.compile(r'\bfail(ed)?\b',   re.I),
+        re.compile(r'\bpassword\b',    re.I),
+        re.compile(r'enter.{0,10}(flag|pass|key|code)', re.I),
+        re.compile(r'\binput\b',       re.I),
+        re.compile(r'\bsecret\b',      re.I),
+        re.compile(r'access.denied',   re.I),
+        re.compile(r'access.granted',  re.I),
+        re.compile(r'\binvalid\b',     re.I),
+        re.compile(r'congratul',       re.I),
+        re.compile(r'well.done',       re.I),
+        re.compile(r'you.win',         re.I),
+        re.compile(r'\bnope\b',        re.I),
+        re.compile(r'try.again',       re.I),
+        re.compile(r'\bflag\b',        re.I),
+    ]
+
+    CRYPTO_RE = [
+        re.compile(r'\baes\b',     re.I),
+        re.compile(r'\bdes\b',     re.I),
+        re.compile(r'\brc4\b',     re.I),
+        re.compile(r'\bxor\b',     re.I),
+        re.compile(r'base64',      re.I),
+        re.compile(r'sha[0-9\-]',  re.I),
+        re.compile(r'\bmd5\b',     re.I),
+        re.compile(r'encrypt',     re.I),
+        re.compile(r'decrypt',     re.I),
+        re.compile(r'\bcipher\b',  re.I),
+        re.compile(r'\brsa\b',     re.I),
+        re.compile(r'\bhmac\b',    re.I),
+    ]
+
+    NETWORK_RE = [
+        re.compile(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'),
+        re.compile(r'https?://'),
+        re.compile(r'\bsocket\b',    re.I),
+        re.compile(r'\blocalhost\b', re.I),
+    ]
+
+    DEBUG_RE = [
+        re.compile(r'\bdebug\b',   re.I),
+        re.compile(r'\bassert\b',  re.I),
+        re.compile(r'\bTODO\b'),
+        re.compile(r'\bFIXME\b'),
+        re.compile(r'\bHACK\b'),
+    ]
+
+    FORMAT_RE = re.compile(r'%[0-9*]*[diouxXeEfgcspn%]')
+
+    NOISE = {
+        '.text', '.data', '.bss', '.rodata', '.comment',
+        '.shstrtab', '.strtab', '.symtab', '.dynstr', '.dynsym',
+        '.dynamic', '.plt', '.got', '.gnu.hash', 'GCC:',
+    }
+
+    @classmethod
+    def categorize(cls, s: str) -> Optional[str]:
+        for p in cls.FLAG_RE:
+            if p.search(s):
+                return "flag_hint"
+        for p in cls.CRYPTO_RE:
+            if p.search(s):
+                return "crypto"
+        for p in cls.NETWORK_RE:
+            if p.search(s):
+                return "network"
+        for p in cls.DEBUG_RE:
+            if p.search(s):
+                return "debug"
+        if cls.FORMAT_RE.search(s):
+            return "format"
+        return None
+
+    @classmethod
+    def is_noise(cls, s: str) -> bool:
+        if s in cls.NOISE:
+            return True
+        if len(s) < 4:
+            return True
+        if all(c in '._-/\\@$' for c in s):
+            return True
+        if re.fullmatch(r'[0-9a-fA-F]+', s) and len(s) > 20:
+            return True
+        return False
+
+    @classmethod
+    def analyze(cls,
+                ascii_strings: List[Tuple[int, str]],
+                wide_strings:  List[Tuple[int, str]],
+                offset_to_vaddr,
+                limit: int = 50) -> List[SuspiciousString]:
+
+        results, seen = [], set()
+        combined = [(o, s, 'a') for o, s in ascii_strings] + \
+                   [(o, s, 'w') for o, s in wide_strings]
+
+        for file_off, s, _ in combined:
+            if s in seen or cls.is_noise(s):
+                continue
+            cat = cls.categorize(s)
+            if cat is None:
+                continue
+            seen.add(s)
+            vaddr = offset_to_vaddr(file_off) or 0
+            results.append(SuspiciousString(
+                file_offset=file_off,
+                vaddr=vaddr,
+                content=s,
+                category=cat,
+            ))
+
+        priority = {"flag_hint": 0, "crypto": 1,
+                    "network": 2, "debug": 3, "format": 4}
+        results.sort(key=lambda x: (priority.get(x.category, 9), x.file_offset))
+        return results[:limit]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ELF PARSER
+# ══════════════════════════════════════════════════════════════════
+
+class ELFParser:
+    def __init__(self, data: bytes, filepath: str):
+        self.data      = data
+        self.filepath  = filepath
+        self.sections: List[SectionInfo] = []
+        self.imports:  List[ImportEntry]  = []
+        self.exports:  List[ExportEntry]  = []
+        self.libraries: List[str]         = []
+        self.phdrs:    List[dict]         = []
+        self.security  = SecurityFlags()
+
+        self._raw_sections: List[dict] = []
+        self._raw_symbols:  List[dict] = []
+        self._raw_dynsyms:  List[dict] = []
+
+        self._parse_ident()
+        self._parse_header()
+        self._parse_sections()
+        self._parse_phdrs()
+        self._parse_symbols()
+        self._parse_dynamic()
+        self._check_security()
+
+    def _parse_ident(self):
+        if self.data[:4] != ELF.MAGIC:
+            raise ValueError("Not an ELF")
+        self.bits = 64 if self.data[4] == ELF.CLASS64 else 32
+        self.le   = self.data[5] == ELF.LSB
+        self.ec   = '<' if self.le else '>'
+
+    def _u(self, fmt: str, off: int) -> tuple:
+        return struct.unpack_from(self.ec + fmt, self.data, off)
+
+    def _parse_header(self):
+        if self.bits == 64:
+            f = self._u('HHIQQQIHHHHHH', 16)
+        else:
+            f = self._u('HHIIIIIHHHHHH', 16)
+        (self.e_type, self.e_machine, _,
+         self.entry, self.ph_off, self.sh_off,
+         self.e_flags, _,
+         self.ph_esz, self.ph_num,
+         self.sh_esz, self.sh_num, self.sh_strndx) = f
+
+    def _parse_sections(self):
+        if self.sh_num == 0 or self.sh_off == 0:
+            return
+        raw = []
+        for i in range(self.sh_num):
+            off = self.sh_off + i * self.sh_esz
+            if self.bits == 64:
+                f = self._u('IIQQQQIIQQ', off)
+                name_i, sh_type, sh_flags, sh_addr, sh_off, sh_size, \
+                    sh_link, sh_info, _, sh_entsize = f
+            else:
+                f = self._u('IIIIIIIIII', off)
+                name_i, sh_type, sh_flags, sh_addr, sh_off, sh_size, \
+                    sh_link, sh_info, _, sh_entsize = f
+            raw.append({
+                'name_i': name_i, 'type': sh_type, 'flags': sh_flags,
+                'addr': sh_addr, 'offset': sh_off, 'size': sh_size,
+                'link': sh_link, 'info': sh_info, 'entsize': sh_entsize,
+            })
+
+        strtab = raw[self.sh_strndx] if self.sh_strndx < len(raw) else None
+        for r in raw:
+            name = self._rstr(strtab['offset'] + r['name_i']) \
+                   if strtab else f"<{r['name_i']}>"
+
+            is_exec  = bool(r['flags'] & ELF.SHF_EXEC)
+            is_write = bool(r['flags'] & ELF.SHF_WRITE)
+            is_alloc = bool(r['flags'] & ELF.SHF_ALLOC)
+
+            if   r['type'] == ELF.SHT_NULL:    label = "NULL"
+            elif is_exec:                        label = "CODE"
+            elif r['type'] == ELF.SHT_NOBITS:  label = "BSS"
+            elif r['type'] == ELF.SHT_NOTE:    label = "NOTE"
+            elif r['type'] == ELF.SHT_DYNAMIC: label = "DYNAMIC"
+            elif r['type'] in (ELF.SHT_SYMTAB, ELF.SHT_DYNSYM): label = "SYMTAB"
+            elif r['type'] == ELF.SHT_STRTAB:  label = "STRTAB"
+            elif r['type'] in (ELF.SHT_REL, ELF.SHT_RELA): label = "RELOC"
+            elif is_alloc:                       label = "DATA"
+            else:                                label = "META"
+
+            sec_data = (self.data[r['offset']:r['offset'] + r['size']]
+                        if r['type'] != ELF.SHT_NOBITS and r['size'] > 0
+                        else b'')
+
+            self.sections.append(SectionInfo(
+                name=name, vaddr=r['addr'], offset=r['offset'],
+                size=r['size'], label=label,
+                writable=is_write, executable=is_exec,
+                entropy=shannon_entropy(sec_data),
+            ))
+            self._raw_sections.append(r)
+
+    def _rstr(self, off: int) -> str:
+        try:
+            end = self.data.index(b'\x00', off)
+            return self.data[off:end].decode('ascii', errors='replace')
+        except ValueError:
+            return ""
+
+    def _parse_phdrs(self):
+        if self.ph_num == 0 or self.ph_off == 0:
+            return
+        for i in range(self.ph_num):
+            off = self.ph_off + i * self.ph_esz
+            if self.bits == 64:
+                p_type, p_flags, p_offset, p_vaddr, _, p_filesz, p_memsz, _ = \
+                    self._u('IIQQQQQQ', off)
+            else:
+                p_type, p_offset, p_vaddr, _, p_filesz, p_memsz, p_flags, _ = \
+                    self._u('IIIIIIII', off)
+            self.phdrs.append({
+                'type': p_type, 'flags': p_flags,
+                'offset': p_offset, 'vaddr': p_vaddr,
+                'filesz': p_filesz, 'memsz': p_memsz,
+            })
+
+    def _parse_symbols(self):
+        for sec, raw in zip(self.sections, self._raw_sections):
+            if raw['type'] not in (ELF.SHT_SYMTAB, ELF.SHT_DYNSYM):
+                continue
+            if raw['entsize'] == 0 or raw['link'] >= len(self.sections):
+                continue
+            strtab_raw = self._raw_sections[raw['link']]
+            num    = raw['size'] // raw['entsize']
+            is_dyn = raw['type'] == ELF.SHT_DYNSYM
+
+            for j in range(num):
+                off = raw['offset'] + j * raw['entsize']
+                if self.bits == 64:
+                    name_i, st_info, _, shndx, value, size = \
+                        self._u('IBBHQQ', off)
+                else:
+                    name_i, value, size, st_info, _, shndx = \
+                        self._u('IIIBBH', off)
+                st_type = st_info & 0xf
+                st_bind = st_info >> 4
+                try:
+                    name = self._rstr(strtab_raw['offset'] + name_i) \
+                           if name_i else ""
+                except Exception:
+                    name = ""
+
+                sym = {'name': name, 'value': value, 'size': size,
+                       'type': st_type, 'bind': st_bind, 'shndx': shndx}
+
+                if is_dyn:
+                    self._raw_dynsyms.append(sym)
+                    if shndx == 0 and name and st_type == 2:
+                        self.imports.append(ImportEntry(name=name))
+                    elif shndx != 0 and name and st_type == 2 and st_bind == 1:
+                        self.exports.append(ExportEntry(name=name, addr=value))
+                else:
+                    self._raw_symbols.append(sym)
+
+            if not is_dyn:
+                self.security.stripped = False
+
+    def _parse_dynamic(self):
+        dyn_raw = next((r for r in self._raw_sections
+                        if r['type'] == ELF.SHT_DYNAMIC), None)
+        if not dyn_raw:
+            return
+        self.security.static_linked = False
+
+        dynstr_sec = next((s for s in self.sections if s.name == '.dynstr'), None)
+        dynstr_raw = next((r for s, r in zip(self.sections, self._raw_sections)
+                           if s.name == '.dynstr'), None)
+        if not dynstr_raw:
+            return
+
+        esz = dyn_raw['entsize'] or (16 if self.bits == 64 else 8)
+        for i in range(dyn_raw['size'] // esz):
+            off = dyn_raw['offset'] + i * esz
+            try:
+                d_tag, d_val = self._u('qQ' if self.bits == 64 else 'iI', off)
+            except struct.error:
+                break
+            if d_tag == ELF.DT_NEEDED:
+                try:
+                    lib = self._rstr(dynstr_raw['offset'] + d_val)
+                    if lib:
+                        self.libraries.append(lib)
+                except Exception:
+                    pass
+
+    def _check_security(self):
+        for ph in self.phdrs:
+            if ph['type'] == ELF.PT_GNU_STACK:
+                self.security.nx = not bool(ph['flags'] & ELF.PF_X)
+                break
+
+        self.security.pie = (self.e_type == ELF.ET_DYN)
+
+        has_relro    = any(ph['type'] == ELF.PT_GNU_RELRO for ph in self.phdrs)
+        has_bind_now = False
+        for raw in self._raw_sections:
+            if raw['type'] != ELF.SHT_DYNAMIC:
+                continue
+            esz = raw['entsize'] or (16 if self.bits == 64 else 8)
+            for i in range(raw['size'] // esz):
+                off = raw['offset'] + i * esz
+                try:
+                    d_tag, d_val = self._u('qQ' if self.bits == 64 else 'iI', off)
+                except struct.error:
+                    break
+                if d_tag == 24:
+                    has_bind_now = True
+                if d_tag == 30 and (d_val & 0x1):
+                    has_bind_now = True
+
+        self.security.relro = ("Full"    if has_relro and has_bind_now else
+                               "Partial" if has_relro else "None")
+
+        all_names = {s['name'] for s in self._raw_symbols + self._raw_dynsyms}
+        self.security.canary = bool(
+            {'__stack_chk_fail', '__stack_chk_guard'} & all_names)
+
+    def offset_to_vaddr(self, off: int) -> Optional[int]:
+        for ph in self.phdrs:
+            if ph['type'] == ELF.PT_LOAD:
+                if ph['offset'] <= off < ph['offset'] + ph['filesz']:
+                    return ph['vaddr'] + (off - ph['offset'])
+        return None
+
+    def get_named_funcs(self) -> List[dict]:
+        hot_patterns = {'main','check','verify','validate','flag',
+                        'encrypt','decrypt','transform','encode',
+                        'decode','process','compare','auth','crack',
+                        'solve','hash','key','pass','secret'}
+        skip = {'deregister_tm_clones','register_tm_clones',
+                'frame_dummy','__do_global_dtors_aux',
+                '__libc_csu_init','__libc_csu_fini',
+                '_init','_fini','_start'}
+        result = []
+        for sym in self._raw_symbols:
+            if sym['type'] != 2 or sym['value'] == 0 or not sym['name']:
+                continue
+            if sym['name'] in skip:
+                continue
+            is_hot = any(p in sym['name'].lower() for p in hot_patterns)
+            result.append({**sym, 'hot': is_hot})
+        result.sort(key=lambda s: s['value'])
+        return result
+
+    def resolve_plt(self) -> Dict[str, int]:
+        plt_sec = next(
+            (s for s in self.sections if s.name in ('.plt', '.plt.got', '.plt.sec')),
+            None)
+        if not plt_sec:
+            return {}
+
+        rela_raw = next(
+            (r for s, r in zip(self.sections, self._raw_sections)
+             if s.name in ('.rela.plt', '.rel.plt')),
+            None)
+        if not rela_raw or rela_raw['entsize'] == 0:
+            return {}
+
+        result = {}
+        num = rela_raw['size'] // rela_raw['entsize']
+        for i in range(num):
+            off = rela_raw['offset'] + i * rela_raw['entsize']
+            try:
+                if self.bits == 64:
+                    _, r_info = self._u('QQ', off)
+                    sym_idx = r_info >> 32
+                else:
+                    _, r_info = self._u('II', off)
+                    sym_idx = r_info >> 8
+            except struct.error:
+                break
+            if sym_idx < len(self._raw_dynsyms):
+                name = self._raw_dynsyms[sym_idx]['name']
+                if name:
+                    result[name] = plt_sec.vaddr + (i + 1) * 16
+        return result
+
+    @property
+    def arch(self) -> str:
+        # ── uses ELF.MACHINE_NAMES ──
+        return ELF.MACHINE_NAMES.get(self.e_machine,
+                                     f"Unknown(0x{self.e_machine:x})")
+
+    @property
+    def elf_type_str(self) -> str:
+        return ("Executable"            if self.e_type == ELF.ET_EXEC else
+                "Shared Object (PIE)"   if self.e_type == ELF.ET_DYN  else
+                f"Type(0x{self.e_type:x})")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PE PARSER
+# ══════════════════════════════════════════════════════════════════
+
+class PEParser:
+    def __init__(self, data: bytes, filepath: str):
+        self.data       = data
+        self.filepath   = filepath
+        self.sections:  List[SectionInfo] = []
+        self.imports:   List[ImportEntry]  = []
+        self.exports:   List[ExportEntry]  = []
+        self.libraries: List[str]          = []
+        self.security   = SecurityFlags()
+        self.image_base = 0
+        self.bits       = 32
+        self.pe_off     = 0
+        self.opt_off    = 0
+        self.sec_off    = 0
+        self.num_secs   = 0
+        self.data_dirs: List[Tuple[int, int]] = []
+
+        self._parse()
+
+    def _u(self, fmt: str, off: int) -> tuple:
+        return struct.unpack_from('<' + fmt, self.data, off)
+
+    def _parse(self):
+        e_lfanew = self._u('I', 0x3c)[0]
+        if self.data[e_lfanew:e_lfanew + 4] != PE.MAGIC_PE:
+            raise ValueError("PE signature not found")
+        self.pe_off = e_lfanew
+
+        (self.machine, self.num_secs, self.timestamp,
+         _sym_off, _num_syms, opt_hdr_sz,
+         self.characteristics) = self._u('HHIIIHH', e_lfanew + 4)
+
+        self.opt_off = e_lfanew + 4 + 20
+        self.sec_off = self.opt_off + opt_hdr_sz
+
+        self._parse_optional()
+        self._parse_sections()
+        self._parse_imports()
+        self._parse_exports()
+        self._check_security()
+
+    def _parse_optional(self):
+        magic = self._u('H', self.opt_off)[0]
+        self.pe_magic = magic
+
+        if magic == PE.PE32PLUS:
+            self.bits       = 64
+            self.image_base = self._u('Q', self.opt_off + 24)[0]
+            self.entry      = self._u('I', self.opt_off + 16)[0]
+            self.subsystem, self.dll_char = self._u('HH', self.opt_off + 68)
+            num_dd  = self._u('I', self.opt_off + 92)[0]
+            dd_off  = self.opt_off + 96
+        else:
+            self.bits       = 32
+            self.image_base = self._u('I', self.opt_off + 28)[0]
+            self.entry      = self._u('I', self.opt_off + 16)[0]
+            self.subsystem, self.dll_char = self._u('HH', self.opt_off + 68)
+            num_dd  = self._u('I', self.opt_off + 92)[0]
+            dd_off  = self.opt_off + 96
+
+        self.linker_major = self._u('B', self.opt_off + 2)[0]
+        self.linker_minor = self._u('B', self.opt_off + 3)[0]
+
+        self.data_dirs = []
+        for i in range(min(num_dd, 16)):
+            rva, sz = self._u('II', dd_off + i * 8)
+            self.data_dirs.append((rva, sz))
+
+    def _parse_sections(self):
+        for i in range(self.num_secs):
+            off      = self.sec_off + i * 40
+            raw_name = self.data[off:off + 8]
+            name     = raw_name.rstrip(b'\x00').decode('ascii', errors='replace')
+
+            (vsize, rva, raw_sz, raw_off,
+             _, _, _, _,
+             chars) = self._u('IIIIIIHHI', off + 8)
+
+            is_exec  = bool(chars & PE.SCN_MEM_EXECUTE)
+            is_write = bool(chars & PE.SCN_MEM_WRITE)
+            is_code  = bool(chars & PE.SCN_CNT_CODE)
+            is_uninit= bool(chars & PE.SCN_CNT_UNINIT_DATA)
+
+            label = ("CODE"     if (is_exec or is_code) else
+                     "BSS"      if is_uninit             else
+                     "DATA (W)" if is_write              else
+                     "DATA")
+
+            sec_data = (self.data[raw_off:raw_off + raw_sz]
+                        if raw_off and raw_sz else b'')
+
+            self.sections.append(SectionInfo(
+                name=name,
+                vaddr=self.image_base + rva,
+                offset=raw_off,
+                size=vsize or raw_sz,
+                label=label,
+                writable=is_write,
+                executable=is_exec,
+                entropy=shannon_entropy(sec_data),
+            ))
+
+    def _rva_to_offset(self, rva: int) -> Optional[int]:
+        for i in range(self.num_secs):
+            off = self.sec_off + i * 40
+            vsize, sec_rva, raw_sz, raw_off = self._u('IIII', off + 8)
+            span = vsize or raw_sz
+            if sec_rva <= rva < sec_rva + span:
+                return raw_off + (rva - sec_rva)
+        return None
+
+    def _read_str(self, off: int, wide: bool = False) -> str:
+        try:
+            if wide:
+                end = off
+                while end < len(self.data) - 1:
+                    if self.data[end] == 0 and self.data[end + 1] == 0:
+                        break
+                    end += 2
+                return self.data[off:end].decode('utf-16-le', errors='replace')
+            else:
+                end = self.data.index(b'\x00', off)
+                return self.data[off:end].decode('ascii', errors='replace')
+        except (ValueError, UnicodeDecodeError):
+            return ""
+
+    def _parse_imports(self):
+        if len(self.data_dirs) < 2:
+            return
+        import_rva, _ = self.data_dirs[1]
+        if import_rva == 0:
+            return
+        self.security.static_linked = False
+
+        off = self._rva_to_offset(import_rva)
+        if off is None:
+            return
+
+        i = 0
+        while True:
+            desc_off = off + i * 20
+            if desc_off + 20 > len(self.data):
+                break
+            orig_thunk, _ts, _fwd, name_rva, first_thunk = \
+                self._u('IIIII', desc_off)
+            if name_rva == 0 and orig_thunk == 0:
+                break
+
+            dll_name_off = self._rva_to_offset(name_rva)
+            dll_name = (self._read_str(dll_name_off)
+                        if dll_name_off is not None else f"<dll_{i}>")
+            if dll_name and dll_name not in self.libraries:
+                self.libraries.append(dll_name)
+
+            thunk_rva = orig_thunk if orig_thunk else first_thunk
+            thunk_off = self._rva_to_offset(thunk_rva)
+            if thunk_off is None:
+                i += 1
+                continue
+
+            j         = 0
+            entry_sz  = 8 if self.bits == 64 else 4
+            ord_flag  = (1 << 63) if self.bits == 64 else (1 << 31)
+
+            while True:
+                e_off = thunk_off + j * entry_sz
+                if e_off + entry_sz > len(self.data):
+                    break
+                val = (self._u('Q', e_off)[0] if self.bits == 64
+                       else self._u('I', e_off)[0])
+                if val == 0:
+                    break
+
+                if val & ord_flag:
+                    ordinal = int(val & 0xffff)
+                    self.imports.append(ImportEntry(
+                        name=f"#{ordinal}", dll=dll_name, ordinal=ordinal))
+                else:
+                    hint_off = self._rva_to_offset(int(val & 0x7fffffff))
+                    if hint_off is not None and hint_off + 2 < len(self.data):
+                        fn = self._read_str(hint_off + 2)
+                        if fn:
+                            self.imports.append(ImportEntry(name=fn, dll=dll_name))
+                j += 1
+            i += 1
+
+    def _parse_exports(self):
+        if len(self.data_dirs) < 1:
+            return
+        exp_rva, _ = self.data_dirs[0]
+        if exp_rva == 0:
+            return
+        off = self._rva_to_offset(exp_rva)
+        if off is None:
+            return
+
+        (_, _, _, _, _,
+         base, num_funcs, num_names,
+         funcs_rva, names_rva, ords_rva) = self._u('IIHIIIIIII', off)
+
+        funcs_off = self._rva_to_offset(funcs_rva)
+        names_off = self._rva_to_offset(names_rva)
+        ords_off  = self._rva_to_offset(ords_rva)
+        if None in (funcs_off, names_off, ords_off):
+            return
+
+        for i in range(num_names):
+            try:
+                name_ptr = self._u('I', names_off + i * 4)[0]
+                ord_idx  = self._u('H', ords_off  + i * 2)[0]
+                func_rva = self._u('I', funcs_off + ord_idx * 4)[0]
+                name_off = self._rva_to_offset(name_ptr)
+                fn       = (self._read_str(name_off)
+                            if name_off else f"#ord{base + ord_idx}")
+                self.exports.append(ExportEntry(
+                    name=fn,
+                    addr=self.image_base + func_rva,
+                    ordinal=base + ord_idx,
+                ))
+            except (struct.error, TypeError):
+                continue
+
+    def _check_security(self):
+        dc = self.dll_char
+        self.security.nx           = bool(dc & PE.DLLCHAR_NX_COMPAT)
+        self.security.aslr         = bool(dc & PE.DLLCHAR_DYNAMIC_BASE)
+        self.security.high_entropy = bool(dc & PE.DLLCHAR_HIGH_ENTROPY_VA)
+        self.security.cfg          = bool(dc & PE.DLLCHAR_GUARD_CF)
+        self.security.seh          = not bool(dc & PE.DLLCHAR_NO_SEH)
+
+        imp_names = {imp.name for imp in self.imports}
+        self.security.canary = bool(
+            {'__security_check_cookie', '__security_cookie',
+             '__GSHandlerCheck'} & imp_names)
+
+        if len(self.data_dirs) > 6:
+            dbg_rva, _ = self.data_dirs[6]
+            self.security.stripped = (dbg_rva == 0)
+
+    def offset_to_vaddr(self, off: int) -> Optional[int]:
+        for i in range(self.num_secs):
+            tbl_off = self.sec_off + i * 40
+            vsize, rva, raw_sz, raw_off = self._u('IIII', tbl_off + 8)
+            span = raw_sz
+            if raw_off and raw_off <= off < raw_off + span:
+                return self.image_base + rva + (off - raw_off)
+        return None
+
+    @property
+    def arch(self) -> str:
+        # ── FIX: uses PE.MACHINE_NAMES ──
+        return PE.MACHINE_NAMES.get(self.machine,
+                                    f"Unknown(0x{self.machine:x})")
+
+    @property
+    def pe_type_str(self) -> str:
+        if self.characteristics & 0x2000: return "DLL"
+        if self.characteristics & 0x0002: return "EXE"
+        return "Unknown"
+
+    @property
+    def subsystem_str(self) -> str:
+        return PE.SUBSYSTEM.get(self.subsystem, f"Unknown({self.subsystem})")
+
+    @property
+    def compile_time(self) -> str:
+        try:
+            dt = datetime.fromtimestamp(self.timestamp, tz=timezone.utc)
+            return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        except Exception:
+            return f"0x{self.timestamp:08x}"
+
+
+# ══════════════════════════════════════════════════════════════════
+#  FLAG CHECK DETECTOR
+# ══════════════════════════════════════════════════════════════════
+
+class FlagCheckDetector:
+
+    CHECK_FUNCS = {
+        'strcmp', 'strncmp', 'memcmp', 'bcmp',
+        'strcasecmp', 'strncasecmp', 'CRYPTO_memcmp',
+        'lstrcmpA', 'lstrcmpW', 'lstrcmpiA', 'lstrcmpiW',
+        'CompareStringA', 'CompareStringW',
+        'EVP_DigestFinal', 'MD5_Final', 'SHA1_Final',
+    }
+
+    @classmethod
+    def analyze_elf(cls, elf: ELFParser,
+                    sus: List[SuspiciousString]) -> List[FlagCandidate]:
+        candidates = []
+        if elf.e_machine == ELF.EM_X86_64:
+            candidates += cls._elf_x64(elf, sus)
+        elif elf.e_machine == ELF.EM_386:
+            candidates += cls._elf_x86(elf, sus)
+        for sym in elf.get_named_funcs():
+            if sym['hot'] and sym['value']:
+                candidates.append(FlagCandidate(
+                    addr=sym['value'],
+                    reason=f"hot function: {sym['name']}"))
+        return cls._dedup(candidates)
+
+    @classmethod
+    def analyze_pe(cls, pe: PEParser,
+                   sus: List[SuspiciousString]) -> List[FlagCandidate]:
+        candidates = []
+        imp_names = {imp.name for imp in pe.imports}
+
+        for fn in cls.CHECK_FUNCS & imp_names:
+            candidates.append(FlagCandidate(
+                addr=0, reason=f"imports comparison function: {fn}"))
+
+        dangerous = PE.DANGEROUS & imp_names
+        for d in dangerous:
+            candidates.append(FlagCandidate(
+                addr=0, reason=f"dangerous API: {d}"))
+
+        flag_strs = [s for s in sus if s.category == "flag_hint"]
+        for exp in pe.exports[:5]:
+            if flag_strs:
+                candidates.append(FlagCandidate(
+                    addr=exp.addr,
+                    reason=f"export near flag strings: {exp.name}"))
+
+        return cls._dedup(candidates)
+
+    @classmethod
+    def _elf_x64(cls, elf: ELFParser,
+                 sus: List[SuspiciousString]) -> List[FlagCandidate]:
+        candidates = []
+        text_sec = next((s for s in elf.sections if s.name == '.text'), None)
+        if not text_sec:
+            return candidates
+
+        td   = elf.data[text_sec.offset:text_sec.offset + text_sec.size]
+        base = text_sec.vaddr
+        lea  = re.compile(b'\x48\x8d.(.{4})', re.DOTALL)
+        call = re.compile(b'\xe8(.{4})',       re.DOTALL)
+
+        for ss in [s for s in sus if s.vaddr]:
+            for m in lea.finditer(td):
+                ia   = base + m.start()
+                disp = struct.unpack('<i', m.group(1))[0]
+                if ia + len(m.group(0)) + disp == ss.vaddr:
+                    fa = cls._prologue_x64(td, m.start(), base)
+                    candidates.append(FlagCandidate(
+                        addr=fa,
+                        reason=f'references "{ss.content[:40]}"',
+                        refs=[f"0x{ia:x}: lea → 0x{ss.vaddr:x}"],
+                    ))
+
+        plt = elf.resolve_plt()
+        for fn, plt_addr in plt.items():
+            if fn not in cls.CHECK_FUNCS:
+                continue
+            for m in call.finditer(td):
+                ia   = base + m.start()
+                disp = struct.unpack('<i', m.group(1))[0]
+                if ia + 5 + disp == plt_addr:
+                    fa = cls._prologue_x64(td, m.start(), base)
+                    candidates.append(FlagCandidate(
+                        addr=fa, reason=f"calls {fn}",
+                        refs=[f"0x{ia:x}: call {fn}@plt"],
+                    ))
+        return candidates
+
+    @classmethod
+    def _elf_x86(cls, elf: ELFParser,
+                 sus: List[SuspiciousString]) -> List[FlagCandidate]:
+        candidates = []
+        text_sec = next((s for s in elf.sections if s.name == '.text'), None)
+        if not text_sec:
+            return candidates
+        td   = elf.data[text_sec.offset:text_sec.offset + text_sec.size]
+        base = text_sec.vaddr
+        for ss in [s for s in sus if s.vaddr]:
+            needle = b'\x68' + struct.pack('<I', ss.vaddr)
+            idx = 0
+            while True:
+                pos = td.find(needle, idx)
+                if pos == -1:
+                    break
+                fa = cls._prologue_x86(td, pos, base)
+                candidates.append(FlagCandidate(
+                    addr=fa,
+                    reason=f'references "{ss.content[:40]}"',
+                    refs=[f"0x{base + pos:x}: push 0x{ss.vaddr:x}"],
+                ))
+                idx = pos + 5
+        return candidates
+
+    @staticmethod
+    def _prologue_x64(td: bytes, off: int, base: int) -> int:
+        lim = max(0, off - 0x300)
+        p   = off
+        while p > lim:
+            p -= 1
+            if td[p] == 0x55 and td[p+1:p+4] == b'\x48\x89\xe5':
+                return base + p
+            if td[p:p+4] == b'\xf3\x0f\x1e\xfa':
+                return base + p
+            if td[p] == 0x55:
+                return base + p
+        return base + off
+
+    @staticmethod
+    def _prologue_x86(td: bytes, off: int, base: int) -> int:
+        lim = max(0, off - 0x300)
+        p   = off
+        while p > lim:
+            p -= 1
+            if td[p] == 0x55 and td[p+1:p+3] == b'\x89\xe5':
+                return base + p
+        return base + off
+
+    @staticmethod
+    def _dedup(lst: List[FlagCandidate]) -> List[FlagCandidate]:
+        seen, out = set(), []
+        for c in lst:
+            key = (c.addr, c.reason[:30])
+            if key not in seen:
+                seen.add(key)
+                out.append(c)
+        return out
+
+
+# ══════════════════════════════════════════════════════════════════
+#  XOR KEY DETECTOR
+# ══════════════════════════════════════════════════════════════════
+
+class XORDetector:
+    @staticmethod
+    def scan(sections: List[SectionInfo], data: bytes) -> List[dict]:
+        results, seen_keys = [], set()
+        for sec in sections:
+            if not sec.executable or sec.size == 0:
+                continue
+            sd = data[sec.offset:sec.offset + sec.size]
+            for i in range(len(sd) - 2):
+                key, hint = None, ""
+                if sd[i] == 0x80 and (sd[i+1] & 0x38) == 0x30:
+                    key, hint = sd[i+2], "xor byte [mem], imm8"
+                elif sd[i] == 0x34:
+                    key, hint = sd[i+1], "xor al, imm8"
+                elif sd[i] == 0x83 and sd[i+1] == 0xf0:
+                    key, hint = sd[i+2], "xor eax, imm8"
+                if key and key != 0 and key not in seen_keys:
+                    seen_keys.add(key)
+                    results.append({
+                        'addr':      sec.vaddr + i,
+                        'key':       key,
+                        'printable': chr(key) if 0x20 <= key <= 0x7e else '?',
+                        'hint':      hint,
+                    })
+                    if len(results) >= 8:
+                        return results
+        return results
+
+
+# ══════════════════════════════════════════════════════════════════
+#  RENDERER
+# ══════════════════════════════════════════════════════════════════
+
+class Renderer:
+
+    @staticmethod
+    def banner():
+        print(f"""
+{C.RED}{C.BOLD}██╗   ██╗███████╗████████╗████████╗ █████╗ ██╗{C.RST}
+{C.RED}{C.BOLD}██║   ██║██╔════╝╚══██╔══╝╚══██╔══╝██╔══██╗██║{C.RST}
+{C.RED}{C.BOLD}██║   ██║█████╗     ██║      ██║   ███████║██║{C.RST}
+{C.RED}{C.BOLD}╚██╗ ██╔╝██╔══╝     ██║      ██║   ██╔══██║██║{C.RST}
+{C.RED}{C.BOLD} ╚████╔╝ ███████╗   ██║      ██║   ██║  ██║██║{C.RST}
+{C.RED}{C.BOLD}  ╚═══╝  ╚══════╝   ╚═╝      ╚═╝   ╚═╝  ╚═╝╚═╝{C.RST}
+{C.YELLOW}  வேட்டை — The Hunt  {C.DIM}│  Professional Binary Recon v2.1{C.RST}
+{C.DIM}  ELF + PE  │  No dependencies  │  Pure Python 3{C.RST}
+""")
+
+    @staticmethod
+    def hdr(title: str, icon: str = "◈"):
+        print(f"\n{C.YELLOW}{'━' * 56}{C.RST}")
+        print(f"{C.YELLOW}{C.BOLD}  {icon}  {title}{C.RST}")
+        print(f"{C.YELLOW}{'━' * 56}{C.RST}")
+
+    # ── File Info ──────────────────────────────────
+
+    @staticmethod
+    def file_info(info: BinaryInfo, libs: List[str]):
+        Renderer.hdr("FILE INFO", "📁")
+
+        fmt_color = C.CYAN if info.fmt == 'elf' else C.MAGENTA
+        fmt_label = f"ELF{info.bits}" if info.fmt == 'elf' else f"PE{info.bits}"
+
+        def row(lbl, val, col=C.WHITE):
+            print(f"  {C.BOLD}{lbl:<14}{C.RST} {col}{val}{C.RST}")
+
+        row("File:",    info.filepath)
+        row("Format:",  fmt_label, fmt_color)
+        row("Arch:",    info.arch, C.CYAN)
+        row("Type:",    info.elf_type or info.pe_type)
+        row("Entry:",   f"0x{info.entry:x}", C.GREEN)
+        row("Size:",    f"{info.filesize:,} bytes  ({info.filesize / 1024:.1f} KB)")
+        row("MD5:",     info.md5,    C.GRAY)
+        row("SHA256:",  info.sha256[:32] + "…", C.GRAY)
+
+        if info.compile_ts:
+            row("Compiled:", info.compile_ts, C.YELLOW)
+        if info.linker_ver:
+            row("Linker:",   info.linker_ver)
+        if info.subsystem:
+            row("Subsystem:", info.subsystem)
+        if libs:
+            row("Libraries:", "  ".join(libs), C.DIM)
+
+    # ── Security ───────────────────────────────────
+
+    @staticmethod
+    def security(sec: SecurityFlags, fmt: str):
+        Renderer.hdr("SECURITY ANALYSIS", "🛡")
+
+        def tick(on: bool, good: bool = True) -> str:
+            col = (C.GREEN if on else C.RED) if good else (C.RED if on else C.GREEN)
+            return f"{col}{'✔ ON ' if on else '✘ OFF'}{C.RST}"
+
+        def row(lbl, val):
+            print(f"  {C.BOLD}{lbl:<20}{C.RST} {val}")
+
+        row("NX / DEP:",      tick(sec.nx))
+        row("Stack Canary:",  tick(sec.canary))
+        row("Symbols:",
+            f"{C.GREEN}present{C.RST}" if not sec.stripped
+            else f"{C.YELLOW}stripped{C.RST}")
+
+        if fmt == 'elf':
+            row("PIE:",   tick(sec.pie))
+            rc = (C.GREEN  if sec.relro == "Full"    else
+                  C.YELLOW if sec.relro == "Partial" else C.RED)
+            row("RELRO:", f"{rc}{sec.relro}{C.RST}")
+            row("Static linked:",
+                f"{C.YELLOW}yes{C.RST}" if sec.static_linked
+                else f"{C.GREEN}no (dynamic){C.RST}")
+        else:
+            row("ASLR:",            tick(sec.aslr))
+            row("High Entropy VA:", tick(sec.high_entropy))
+            row("SEH:",             tick(sec.seh))
+            row("CFG:",             tick(sec.cfg))
+
+    # ── Sections ───────────────────────────────────
+
+    @staticmethod
+    def sections(secs: List[SectionInfo]):
+        Renderer.hdr("SECTIONS", "📦")
+        visible = [s for s in secs
+                   if s.size > 0 and s.label not in ("NULL", "META", "STRTAB")]
+        if not visible:
+            print(f"  {C.DIM}No sections{C.RST}")
+            return
+        print(f"  {C.BOLD}{'Name':<18} {'VirtAddr':<18} {'Size':<12} "
+              f"{'Type':<12} {'Entropy':<8} Flags{C.RST}")
+        print(f"  {'─' * 72}")
+        for s in visible:
+            lc = (C.CYAN   if s.label == "CODE"     else
+                  C.GREEN  if "DATA" in s.label      else
+                  C.YELLOW if s.label == "BSS"       else C.DIM)
+            ec = (C.RED    if s.entropy > 7.5        else
+                  C.YELLOW if s.entropy > 6.5        else C.DIM)
+            fl = ("X" if s.executable else "") + ("W" if s.writable else "") or "R"
+            print(f"  {s.name:<18} {C.GREEN}0x{s.vaddr:<16x}{C.RST} "
+                  f"0x{s.size:<10x} {lc}{s.label:<12}{C.RST} "
+                  f"{ec}{s.entropy:<8.2f}{C.RST} {C.DIM}{fl}{C.RST}")
+
+    # ── Strings ────────────────────────────────────
+
+    @staticmethod
+    def strings(sus: List[SuspiciousString]):
+        Renderer.hdr("SUSPICIOUS STRINGS", "🔍")
+        if not sus:
+            print(f"  {C.DIM}None found{C.RST}")
+            return
+        icons = {
+            "flag_hint": ("🚩", C.RED),
+            "crypto":    ("🔐", C.MAGENTA),
+            "network":   ("🌐", C.BLUE),
+            "debug":     ("🐛", C.YELLOW),
+            "format":    ("📝", C.CYAN),
+        }
+        for s in sus:
+            icon, col = icons.get(s.category, ("•", C.WHITE))
+            addr = (f"0x{s.vaddr:08x}" if s.vaddr
+                    else f"off:0x{s.file_offset:06x}")
+            txt = s.content if len(s.content) <= 65 else s.content[:62] + "..."
+            print(f"  {icon} {C.GREEN}[{addr}]{C.RST}  {col}\"{txt}\"{C.RST}")
+
+    # ── Imports ────────────────────────────────────
+
+    @staticmethod
+    def imports(imports: List[ImportEntry], fmt: str):
+        Renderer.hdr("IMPORTS", "📥")
+        if not imports:
+            print(f"  {C.DIM}No imports (statically linked?){C.RST}")
+            return
+
+        check_f  = FlagCheckDetector.CHECK_FUNCS
+        input_f  = PE.INPUT_FUNCS
+        output_f = PE.OUTPUT_FUNCS
+
+        def classify(n):
+            if n in check_f:   return C.RED,     "⚔  comparison"
+            if n in input_f:   return C.YELLOW,  "📥 input"
+            if n in output_f:  return C.CYAN,    "📤 output"
+            if n in PE.DANGEROUS: return C.RED,  "⚠  DANGEROUS"
+            if n in PE.CRYPTO: return C.MAGENTA, "🔐 crypto"
+            return C.DIM, ""
+
+        if fmt == 'pe':
+            by_dll: Dict[str, List[ImportEntry]] = {}
+            for imp in imports:
+                by_dll.setdefault(imp.dll, []).append(imp)
+            for dll, entries in by_dll.items():
+                print(f"\n  {C.BOLD}{C.MAGENTA}{dll}{C.RST}")
+                for imp in entries:
+                    col, tag = classify(imp.name)
+                    print(f"    {col}{imp.name:<40}{C.RST} {C.DIM}{tag}{C.RST}")
+        else:
+            important, others = [], []
+            for imp in imports:
+                col, tag = classify(imp.name)
+                if tag:
+                    important.append((imp.name, col, tag))
+                else:
+                    others.append(imp.name)
+            for name, col, tag in important:
+                print(f"  {col}{name:<35}{C.RST} {C.DIM}{tag}{C.RST}")
+            if others:
+                print(f"\n  {C.DIM}Others: {', '.join(sorted(others))}{C.RST}")
+
+    # ── Exports ────────────────────────────────────
+
+    @staticmethod
+    def exports(exports: List[ExportEntry]):
+        if not exports:
+            return
+        Renderer.hdr("EXPORTS", "📤")
+        for exp in exports[:20]:
+            print(f"  {C.GREEN}0x{exp.addr:x}{C.RST}  {exp.name}")
+        if len(exports) > 20:
+            print(f"  {C.DIM}… and {len(exports) - 20} more{C.RST}")
+
+    # ── Named Functions (ELF) ──────────────────────
+
+    @staticmethod
+    def named_functions(elf: ELFParser):
+        if elf.security.stripped:
+            return
+        Renderer.hdr("NAMED FUNCTIONS", "🧩")
+        funcs = elf.get_named_funcs()
+        if not funcs:
+            return
+        for sym in funcs[:25]:
+            col    = C.RED   if sym['hot'] else C.WHITE
+            marker = "  🎯"  if sym['hot'] else ""
+            sz     = f"  sz:{sym['size']}" if sym['size'] else ""
+            print(f"  {C.GREEN}0x{sym['value']:08x}{C.RST}  "
+                  f"{col}{sym['name']}{C.RST}{C.DIM}{sz}{C.RST}{marker}")
+        if len(funcs) > 25:
+            print(f"  {C.DIM}… {len(funcs) - 25} more{C.RST}")
+
+    # ── Flag Candidates ────────────────────────────
+
+    @staticmethod
+    def flag_candidates(cands: List[FlagCandidate]):
+        Renderer.hdr("FLAG-CHECK CANDIDATES", "🎯")
+        if not cands:
+            print(f"  {C.DIM}No flag-check patterns detected{C.RST}")
+            return
+        for fc in cands[:15]:
+            addr = f"0x{fc.addr:x}" if fc.addr else "imported"
+            print(f"\n  {C.RED}{C.BOLD}🎯 {addr}{C.RST}  {fc.reason}")
+            for r in fc.refs:
+                print(f"     {C.DIM}└─ {r}{C.RST}")
+
+    # ── XOR Keys ───────────────────────────────────
+
+    @staticmethod
+    def xor_keys(keys: List[dict]):
+        if not keys:
+            return
+        Renderer.hdr("POTENTIAL XOR KEYS", "🔑")
+        for k in keys:
+            print(f"  {C.MAGENTA}0x{k['addr']:x}{C.RST}  "
+                  f"key={C.YELLOW}0x{k['key']:02x}{C.RST} "
+                  f"{C.DIM}('{k['printable']}')  {k['hint']}{C.RST}")
+
+    # ── Entropy ────────────────────────────────────
+
+    @staticmethod
+    def entropy(secs: List[SectionInfo]):
+        anomalies = [(s.name, s.entropy) for s in secs if s.entropy > 6.2]
+        if not anomalies:
+            return
+        Renderer.hdr("ENTROPY ANOMALIES", "📊")
+        for name, ent in anomalies:
+            bar   = "█" * int(ent * 3) + "░" * (24 - int(ent * 3))
+            col   = C.RED if ent > 7.5 else C.YELLOW
+            label = "PACKED/ENCRYPTED" if ent > 7.5 else "HIGH ENTROPY"
+            print(f"  {name:<18} {col}{bar} {ent:.2f}/8.0  {label}{C.RST}")
+
+    # ── Tips ───────────────────────────────────────
+
+    @staticmethod
+    def tips(info: BinaryInfo,
+             sec: SecurityFlags,
+             cands: List[FlagCandidate],
+             imports: List[ImportEntry],
+             sus: List[SuspiciousString]):
+        Renderer.hdr("HUNTER'S TIPS", "⚡")
+        tips = []
+        fname = os.path.basename(info.filepath)
+
+        if info.fmt == 'elf':
+            if not sec.pie and cands:
+                tips.append(f"{C.CYAN}GDB:{C.RST} {C.BOLD}b *0x{cands[0].addr:x}{C.RST}")
+            if sec.pie:
+                tips.append(f"{C.CYAN}GDB PIE:{C.RST} use "
+                            f"{C.BOLD}info proc mappings{C.RST} for base addr")
+            check_i = [i.name for i in imports
+                       if i.name in ('strcmp','strncmp','memcmp')]
+            if check_i:
+                fn = check_i[0]
+                tips.append(f"{C.CYAN}GDB:{C.RST} {C.BOLD}b {fn}{C.RST} "
+                            f"→ {C.BOLD}x/s $rdi{C.RST} / {C.BOLD}x/s $rsi{C.RST}")
+            if not sec.stripped:
+                tips.append(f"{C.CYAN}Symbols:{C.RST} "
+                            f"{C.BOLD}nm {fname} | grep -iE 'check|flag|verify'{C.RST}")
+            if not sec.nx:
+                tips.append(f"{C.RED}⚠  NX disabled{C.RST} — shellcode injection possible")
+            tips.append(f"{C.CYAN}ltrace:{C.RST} {C.BOLD}ltrace ./{fname}{C.RST}")
+            tips.append(f"{C.CYAN}strace:{C.RST} {C.BOLD}strace ./{fname}{C.RST}")
+        else:
+            if not sec.aslr and cands and cands[0].addr:
+                tips.append(f"{C.CYAN}x64dbg:{C.RST} "
+                            f"{C.BOLD}bp 0x{cands[0].addr:x}{C.RST} (no ASLR)")
+            elif sec.aslr:
+                tips.append(f"{C.CYAN}x64dbg:{C.RST} ASLR on — use Module+offset")
+            check_i = [i.name for i in imports
+                       if i.name in ('strcmp','strncmp','lstrcmpA','lstrcmpW')]
+            if check_i:
+                tips.append(f"{C.CYAN}x64dbg:{C.RST} break on {C.BOLD}{check_i[0]}{C.RST}")
+            dang = [i.name for i in imports if i.name in PE.DANGEROUS]
+            if dang:
+                tips.append(f"{C.RED}⚠  Dangerous APIs:{C.RST} {', '.join(dang[:5])}")
+            tips.append(f"{C.CYAN}Wide strings:{C.RST} "
+                        f"{C.BOLD}strings -el {fname}{C.RST}")
+            tips.append(f"{C.CYAN}DIE:{C.RST} run Detect-It-Easy for packer ID")
+
+        fs = [s for s in sus
+              if 'flag' in s.content.lower() or 'correct' in s.content.lower()]
+        if fs and fs[0].vaddr:
+            tips.append(f"{C.CYAN}Watch:{C.RST} memory BP at "
+                        f"{C.BOLD}0x{fs[0].vaddr:x}{C.RST} (flag string)")
+
+        print()
+        for t in tips:
+            print(f"  {C.BOLD}→{C.RST} {t}")
+        print()
+
+    # ── Summary ────────────────────────────────────
+
+    @staticmethod
+    def summary(info: BinaryInfo,
+                sus: List[SuspiciousString],
+                cands: List[FlagCandidate],
+                imports: List[ImportEntry]):
+        Renderer.hdr("HUNT SUMMARY", "🩸")
+        flag_n   = sum(1 for s in sus if s.category == "flag_hint")
+        crypto_n = sum(1 for s in sus if s.category == "crypto")
+        check_i  = [i for i in imports if i.name in FlagCheckDetector.CHECK_FUNCS]
+
+        print(f"  {C.BOLD}Flag-hint strings:{C.RST}  "
+              f"{C.RED if flag_n else C.DIM}{flag_n}{C.RST}")
+        print(f"  {C.BOLD}Crypto strings:{C.RST}     "
+              f"{C.MAGENTA if crypto_n else C.DIM}{crypto_n}{C.RST}")
+        print(f"  {C.BOLD}Check functions:{C.RST}    "
+              f"{C.RED if check_i else C.DIM}"
+              f"{len(check_i)} ({', '.join(set(i.name for i in check_i))}){C.RST}")
+        print(f"  {C.BOLD}Flag candidates:{C.RST}    "
+              f"{C.RED if cands else C.DIM}{len(cands)}{C.RST}")
+        print()
+        if cands:
+            print(f"  {C.GREEN}{C.BOLD}Start here:{C.RST}")
+            for fc in cands[:3]:
+                addr = f"0x{fc.addr:x}" if fc.addr else "imported"
+                print(f"    {C.RED}🎯 {addr}{C.RST}  —  {fc.reason}")
+        print()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════
+
+def detect_fmt(data: bytes) -> str:
+    if data[:4] == ELF.MAGIC:
+        return 'elf'
+    if data[:2] == PE.MAGIC_DOS:
+        try:
+            pe_off = struct.unpack_from('<I', data, 0x3c)[0]
+            if data[pe_off:pe_off + 4] == PE.MAGIC_PE:
+                return 'pe'
+        except Exception:
+            pass
+    return 'unknown'
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog='vettai',
+        description='வேட்டை — Professional Binary Recon (ELF + PE)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  vettai chall
+  vettai CrackMe.exe
+  vettai --no-color malware.bin
+  vettai --min-str 6 crackme
+  vettai --json challenge.exe
+        """)
+    ap.add_argument('binary')
+    ap.add_argument('--no-color',  action='store_true')
+    ap.add_argument('--min-str',   type=int, default=5, metavar='N')
+    ap.add_argument('--no-tips',   action='store_true')
+    ap.add_argument('--json',      action='store_true')
+    args = ap.parse_args()
+
+    if args.no_color:
+        C.disable()
+
+    if not os.path.isfile(args.binary):
+        print(f"Error: '{args.binary}' not found")
+        sys.exit(1)
+
+    with open(args.binary, 'rb') as f:
+        data = f.read()
+
+    fmt = detect_fmt(data)
+    if fmt == 'unknown':
+        print(f"Error: Unrecognised format. First 16 bytes: {data[:16].hex()}")
+        sys.exit(1)
+
+    md5    = hashlib.md5(data).hexdigest()
+    sha256 = hashlib.sha256(data).hexdigest()
+
+    Renderer.banner()
+
+    # ── ELF path ───────────────────────────────────
+
+    if fmt == 'elf':
+        try:
+            binary = ELFParser(data, args.binary)
+        except Exception as e:
+            print(f"{C.RED}ELF parse error: {e}{C.RST}")
+            sys.exit(1)
+
+        info = BinaryInfo(
+            filepath=args.binary, fmt='elf',
+            bits=binary.bits, arch=binary.arch,
+            entry=binary.entry,
+            filesize=len(data), md5=md5, sha256=sha256,
+            elf_type=binary.elf_type_str,
+        )
+        ascii_s = extract_strings(data, args.min_str)
+        wide_s  = []
+        sus     = StringAnalyzer.analyze(ascii_s, wide_s, binary.offset_to_vaddr)
+        cands   = FlagCheckDetector.analyze_elf(binary, sus)
+        xkeys   = XORDetector.scan(binary.sections, data)
+
+        Renderer.file_info(info, binary.libraries)
+        Renderer.security(binary.security, 'elf')
+        Renderer.sections(binary.sections)
+        Renderer.strings(sus)
+        Renderer.imports(binary.imports, 'elf')
+        Renderer.named_functions(binary)
+        Renderer.flag_candidates(cands)
+        Renderer.xor_keys(xkeys)
+        Renderer.entropy(binary.sections)
+        if not args.no_tips:
+            Renderer.tips(info, binary.security, cands, binary.imports, sus)
+        Renderer.summary(info, sus, cands, binary.imports)
+
+    # ── PE path ────────────────────────────────────
+
+    else:
+        try:
+            binary = PEParser(data, args.binary)
+        except Exception as e:
+            print(f"{C.RED}PE parse error: {e}{C.RST}")
+            sys.exit(1)
+
+        info = BinaryInfo(
+            filepath=args.binary, fmt='pe',
+            bits=binary.bits,
+            arch=binary.arch,          # ← now calls PE.MACHINE_NAMES correctly
+            entry=binary.image_base + binary.entry,
+            filesize=len(data), md5=md5, sha256=sha256,
+            pe_type=binary.pe_type_str,
+            compile_ts=binary.compile_time,
+            linker_ver=f"{binary.linker_major}.{binary.linker_minor}",
+            subsystem=binary.subsystem_str,
+        )
+        ascii_s = extract_strings(data, args.min_str)
+        wide_s  = extract_wide_strings(data, args.min_str)
+        sus     = StringAnalyzer.analyze(ascii_s, wide_s, binary.offset_to_vaddr)
+        cands   = FlagCheckDetector.analyze_pe(binary, sus)
+        xkeys   = XORDetector.scan(binary.sections, data)
+
+        Renderer.file_info(info, binary.libraries)
+        Renderer.security(binary.security, 'pe')
+        Renderer.sections(binary.sections)
+        Renderer.strings(sus)
+        Renderer.imports(binary.imports, 'pe')
+        Renderer.exports(binary.exports)
+        Renderer.flag_candidates(cands)
+        Renderer.xor_keys(xkeys)
+        Renderer.entropy(binary.sections)
+        if not args.no_tips:
+            Renderer.tips(info, binary.security, cands, binary.imports, sus)
+        Renderer.summary(info, sus, cands, binary.imports)
+
+    # ── JSON dump ──────────────────────────────────
+
+    if args.json:
+        import json
+        print("\n" + json.dumps({
+            "file":    info.filepath,
+            "format":  f"{'ELF' if fmt == 'elf' else 'PE'}{info.bits}",
+            "arch":    info.arch,
+            "entry":   hex(info.entry),
+            "md5":     md5,
+            "sha256":  sha256,
+            "suspicious_strings": [
+                {"addr": hex(s.vaddr), "content": s.content, "category": s.category}
+                for s in sus
+            ],
+            "flag_candidates": [
+                {"addr": hex(fc.addr), "reason": fc.reason}
+                for fc in cands
+            ],
+            "imports": [i.name for i in binary.imports],
+        }, indent=2))
+
+
+if __name__ == '__main__':
+    main()
